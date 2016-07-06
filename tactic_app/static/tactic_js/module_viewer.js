@@ -5,9 +5,9 @@
 var current_theme = "default";
 var mousetrap = new Mousetrap();
 var myCodeMirror;
-var savedCode = none;
-var savedTags = none;
-var savedNotes = none;
+var savedCode = null;
+var savedTags = null;
+var savedNotes = null;
 
 mousetrap.bind("esc", function() {
     clearStatusArea();
@@ -29,7 +29,8 @@ function start_post_load() {
         lineNumbers: true,
         matchBrackets: true,
         autoCloseBrackets: true,
-        indentUnit: 4
+        indentUnit: 4,
+        readOnly: view_only
     });
     myCodeMirror.setOption("extraKeys", {
       Tab: function(cm) {
@@ -191,4 +192,24 @@ function loadModule() {
 
 function saveModuleAs() {
     doFlash({"message": "not implemented yet"})
+}
+
+function copyToLibrary() {
+    showModal("Import tile", "New tile Name", function (new_name) {
+        var result_dict = {
+            "res_type": "tile",
+            "res_name": module_name,
+            "new_res_name": new_name
+        };
+
+        $.ajax({
+            url: $SCRIPT_ROOT + 'copy_from_repository',
+            contentType: 'application/json',
+            type: 'POST',
+            async: true,
+            data: JSON.stringify(result_dict),
+            dataType: 'json',
+            success: doFlash
+        });
+    });
 }

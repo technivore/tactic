@@ -8,10 +8,10 @@ from docker_functions import create_container, get_address, destroy_container
 from tactic_app import shared_dicts
 from tactic_app import app, socketio, mongo_uri, megaplex_address, use_ssl
 from views.user_manage_views import tile_manager, project_manager
+from views import user_manage_views
 import uuid
 import copy
 import traceback
-
 
 class HostWorker(QWorker):
     def __init__(self, app, megaplex_address):
@@ -22,12 +22,39 @@ class HostWorker(QWorker):
     def stop_user_manage_spinner(self, data):
         socketio.emit('stop-spinner', {}, namespace='/user_manage', room=data["user_manage_id"])
 
+    def show_um_status_message(self, msg, user_manage_id, timeout=3):
+        if timeout is None:
+            data = {"message": msg}
+        else:
+            data = {"message": msg, "timeout": timeout}
+        socketio.emit('show-status-msg', data, namespace='/user_manage', room=user_manage_id)
+
+    def clear_um_status_message(self, user_manage_id):
+        socketio.emit('clear-status-msg', {}, namespace='/user_manage', room=user_manage_id)
+
+    @task_worthy
+    def show_main_status_message(self, data):
+        socketio.emit('show-status-msg', data, namespace='/main', room=data["main_id"])
+
+    @task_worthy
+    def clear_main_status_message(self, data):
+        socketio.emit('clear-status-msg', {}, namespace='/main', room=data["main_id"])
+
+    @task_worthy
+    def show_um_status_message_task(self, data):
+        socketio.emit('show-status-msg', data, namespace='/user_manage', room=data["user_manage_id"])
+
+    @task_worthy
+    def clear_um_status_message_task(self, data):
+        socketio.emit('clear-status-msg', {}, namespace='/user_manage', room=data["user_manage_id"])
+
     @task_worthy
     def main_project(self, data):
         user_id = data["user_id"]
         project_name = data["project_name"]
         user_manage_id = data["user_manage_id"]
         user_obj = load_user(user_id)
+        self.show_um_status_message("creating main container", user_manage_id, None)
         main_id = create_container("tactic_main_image", network_mode="bridge")["Id"]
         caddress = get_address(main_id, "bridge")
         send_request_to_container(self.megaplex_address, "add_address", {"container_id": "main", "address": caddress})
@@ -52,6 +79,7 @@ class HostWorker(QWorker):
                      "base_figure_url": bf_url,
                      "use_ssl": use_ssl}
 
+        self.show_um_status_message("start initialize project", user_manage_id, None)
         result = send_request_to_container(caddress, "initialize_project_mainwindow", data_dict).json()
         if not result["success"]:
             raise Exception(result["message_string"])
@@ -136,6 +164,7 @@ class HostWorker(QWorker):
         result = {"tile_types": tile_types}
         return result
 
+    # todo should clear temp_dict entry after use?
     @task_worthy
     def open_project_window(self, data):
         from tactic_app import socketio
@@ -150,6 +179,13 @@ class HostWorker(QWorker):
         socketio.emit("window-open", {"the_id": unique_id}, namespace='/user_manage', room=data["user_manage_id"])
         socketio.emit('stop-spinner', {}, namespace='/user_manage', room=data["user_manage_id"])
         return {"success": True}
+
+    # todo I'm in the middle of figuring out how to do this send_file_to_client
+    # currently I'm thinking I'll do it with something like the temp page loading
+    @task_worthy
+    def send_file_to_client(self, data):
+        from tactic_app import socketio
+        str_io = cPickle.loads(data["encoded_str_io"]).decode("utf-8", "ignore").encode("ascii")
 
     @task_worthy
     def open_error_window(self, data):
@@ -247,7 +283,11 @@ class ClientWorker(QWorker):
     def _run(self):
         self.running = True
         while self.running:
-            task_packet = self.get_next_task()
+            try:
+                task_packet = self.get_next_task()
+            except Exception as ex:
+                special_string = "Error in get_next_task for my_id {}".format(self.my_id)
+                self.handle_exception(ex, special_string)
             if "empty" not in task_packet:
                 if task_packet["callback_id"] is not None:
                     self.socketio.emit("handle-callback", task_packet, namespace='/main', room=task_packet["main_id"])

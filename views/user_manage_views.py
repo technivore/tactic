@@ -19,7 +19,7 @@ from tactic_app.shared_dicts import test_tile_container_id, get_tile_code
 from tactic_app.user_tile_env import create_user_tiles
 from tactic_app.users import User
 from tactic_app.communication_utils import send_request_to_container
-from docker_functions import send_direct_request_to_container
+from tactic_app.docker_functions import send_direct_request_to_container
 
 from tactic_app.docker_functions import create_container, get_address
 from tactic_app import megaplex_address, megaplex_id
@@ -33,15 +33,24 @@ ip_info = subprocess.check_output(['ip', '-4', 'addr', 'show', 'scope', 'global'
 host_ip = re.search("inet (.*?)/", ip_info).group(1)
 
 
-def start_spinner():
-    socketio.emit('start-spinner', {}, namespace='/user_manage', room=current_user.get_id())
+def start_spinner(user_id=None):
+    if user_id is None:
+        user_id = current_user.get_id()
+    socketio.emit('start-spinner', {}, namespace='/user_manage', room=user_id)
 
-def stop_spinner():
-    socketio.emit('stop-spinner', {}, namespace='/user_manage', room=current_user.get_id())
 
-def doflash(message, alert_type='alert-info'):
+def stop_spinner(user_id=None):
+    if user_id is None:
+        user_id = current_user.get_id()
+    socketio.emit('stop-spinner', {}, namespace='/user_manage', room=user_id)
+
+
+def doflash(message, alert_type='alert-info', user_id=None):
+    if user_id is None:
+        user_id = current_user.get_id()
     data = {"message": message, "alert_type": alert_type}
-    socketio.emit('stop-spinner', data, namespace='/user_manage', room=current_user.get_id())
+    socketio.emit('stop-spinner', data, namespace='/user_manage', room=user_id)
+
 
 class ResourceManager(object):
     is_repository = False
@@ -179,34 +188,37 @@ def get_manager_for_type(res_type, is_repository=False):
 @app.route('/copy_from_repository', methods=['GET', 'POST'])
 @login_required
 def copy_from_repository():
-    res_type = request.json['res_type']
+    try:
+        res_type = request.json['res_type']
 
-    new_res_name = request.json['new_res_name']
-    res_name = request.json['res_name']
-
-    if res_type == "collection":
-        collection_to_copy = repository_user.full_collection_name(request.json['res_name'])
-        new_collection_name = current_user.full_collection_name(request.json['new_res_name'])
-        for doc in db[collection_to_copy].find():
-            db[new_collection_name].insert_one(doc)
-        db[new_collection_name].update_one({"name": "__metadata__"},
-                                           {'$set': {"datatime": datetime.datetime.today()}})
-    else:
+        new_res_name = request.json['new_res_name']
+        res_name = request.json['res_name']
         manager = get_manager_for_type(res_type)
-        repo_manager = get_manager_for_type(res_type, is_repository=True)
-        old_dict = db[getattr(repository_user, repo_manager.collection_name)].find_one({manager.name_field: res_name})
-        new_res_dict = {manager.name_field: new_res_name}
-        for (key, val) in old_dict.items():
-            if (key == "_id") or (key == manager.name_field):
-                continue
-            new_res_dict[key] = val
-        if "metadata" not in new_res_dict:
-            new_res_dict["metadata"] = create_initial_metadata()
+        if res_type == "collection":
+            collection_to_copy = repository_user.full_collection_name(request.json['res_name'])
+            new_collection_name = current_user.full_collection_name(request.json['new_res_name'])
+            for doc in db[collection_to_copy].find():
+                db[new_collection_name].insert_one(doc)
+            db[new_collection_name].update_one({"name": "__metadata__"},
+                                               {'$set': {"datatime": datetime.datetime.today()}})
         else:
-            new_res_dict["metadata"]["datetime"] = datetime.datetime.today()
-        db[getattr(current_user, repo_manager.collection_name)].insert_one(new_res_dict)
-    manager.update_selector_list(select=new_res_name)
-    return jsonify({"success": True})
+            repo_manager = get_manager_for_type(res_type, is_repository=True)
+            old_dict = db[getattr(repository_user, repo_manager.collection_name)].find_one({manager.name_field: res_name})
+            new_res_dict = {manager.name_field: new_res_name}
+            for (key, val) in old_dict.items():
+                if (key == "_id") or (key == manager.name_field):
+                    continue
+                new_res_dict[key] = val
+            if "metadata" not in new_res_dict:
+                new_res_dict["metadata"] = create_initial_metadata()
+            else:
+                new_res_dict["metadata"]["datetime"] = datetime.datetime.today()
+            db[getattr(current_user, repo_manager.collection_name)].insert_one(new_res_dict)
+        manager.update_selector_list(select=new_res_name)
+        return jsonify({"success": True, "message": "Resource Successfully Copied", "alert_type": "alert-success"})
+    except:
+        error_string = "Error copying resource" + str(sys.exc_info()[0]) + " " + str(sys.exc_info()[1])
+        return jsonify({"success": False, "message": error_string, "alert_type": "alert-warning"})
 
 
 @app.route('/request_update_selector_list/<res_type>', methods=['GET'])
@@ -245,6 +257,7 @@ class ListManager(ResourceManager):
 
     def add_rules(self):
         app.add_url_rule('/view_list/<list_name>', "view_list", login_required(self.view_list), methods=['get'])
+        app.add_url_rule('/repository_view_list/<list_name>', "repository_view_list", login_required(self.repository_view_list), methods=['get'])
         app.add_url_rule('/add_list', "add_list", login_required(self.add_list), methods=['get', "post"])
         app.add_url_rule('/delete_list/<list_name>', "delete_list", login_required(self.delete_list), methods=['post'])
         app.add_url_rule('/create_duplicate_list', "create_duplicate_list",
@@ -252,9 +265,23 @@ class ListManager(ResourceManager):
 
     def view_list(self, list_name):
         the_list = current_user.get_list(list_name)
+        lstring = ""
+        for w in the_list:
+            lstring += w + "\n"
         return render_template("user_manage/list_viewer.html",
                                list_name=list_name,
-                               the_list=the_list)
+                               the_list_as_string=lstring,
+                               read_only_string="")
+
+    def repository_view_list(self, list_name):
+        the_list = repository_user.get_list(list_name)
+        lstring = ""
+        for w in the_list:
+            lstring += w + "\n"
+        return render_template("user_manage/list_viewer.html",
+                               list_name=list_name,
+                               the_list_as_string=lstring,
+                               read_only_string="readonly")
 
     def grab_metadata(self, res_name):
         if self.is_repository:
@@ -277,6 +304,7 @@ class ListManager(ResourceManager):
         mdata["tags"] = tags
         mdata["notes"] = notes
         db[current_user.list_collection_name].update_one({"list_name": res_name}, {'$set': {"metadata": mdata}})
+        self.update_selector_list()
 
     def add_list(self):
         user_obj = current_user
@@ -361,10 +389,11 @@ class CollectionManager(ResourceManager):
         the_collection = db[cname]
         doc_names = []
         for f in the_collection.find():
-            if str(f["name"]) == "__metadata__":
+            fname = f["name"].encode("ascii", "ignore")
+            if fname == "__metadata__":
                 continue
             else:
-                doc_names.append(str(f["name"]))
+                doc_names.append(fname)
 
         return render_template("main.html",
                                collection_name=cname,
@@ -394,6 +423,7 @@ class CollectionManager(ResourceManager):
         else:
             db[cname].update_one({"name": "__metadata__"},
                                  {'$set': {"tags": tags, "notes": notes}})
+        self.update_selector_list()
 
     def autosplit_doc(self, filename, full_dict):
         sorted_int_keys = sorted([int(key) for key in full_dict.keys()])
@@ -436,6 +466,7 @@ class CollectionManager(ResourceManager):
 
         for the_file in file_list:
             filename, file_extension = os.path.splitext(the_file.filename)
+            filename = filename.encode("ascii", "ignore")
             if file_extension == ".csv":
                 (success, result_dict, header_list) = read_csv_file_to_dict(the_file)
             elif file_extension == ".tsv":
@@ -532,6 +563,7 @@ class ProjectManager(ResourceManager):
         mdata["tags"] = tags
         mdata["notes"] = notes
         db[current_user.project_collection_name].update_one({"project_name": res_name}, {'$set': {"metadata": mdata}})
+        self.update_selector_list()
 
 
 class RepositoryProjectManager(ProjectManager):
@@ -551,6 +583,8 @@ class TileManager(ResourceManager):
     def add_rules(self):
         app.add_url_rule('/view_module/<module_name>', "view_module",
                          login_required(self.view_module), methods=['get'])
+        app.add_url_rule('/repository_view_module/<module_name>', "repository_view_module",
+                         login_required(self.repository_view_module), methods=['get'])
         app.add_url_rule('/load_tile_module/<tile_module_name>', "load_tile_module",
                          login_required(self.load_tile_module), methods=['get', 'post'])
         app.add_url_rule('/unload_all_tiles', "unload_all_tiles",
@@ -563,6 +597,8 @@ class TileManager(ResourceManager):
                          login_required(self.create_tile_module), methods=['get', 'post'])
         app.add_url_rule('/request_update_loaded_tile_list', "request_update_loaded_tile_list",
                          login_required(self.request_update_loaded_tile_list), methods=['get', 'post'])
+        app.add_url_rule('/create_duplicate_tile', "create_duplicate_tile",
+                         login_required(self.create_duplicate_tile), methods=['get', 'post'])
 
     def grab_metadata(self, res_name):
         if self.is_repository:
@@ -585,13 +621,23 @@ class TileManager(ResourceManager):
         mdata["tags"] = tags
         mdata["notes"] = notes
         db[current_user.tile_collection_name].update_one({"tile_module_name": res_name}, {'$set': {"metadata": mdata}})
+        self.update_selector_list()
 
     def view_module(self, module_name):
         user_obj = current_user
         module_code = user_obj.get_tile_module(module_name)
         return render_template("user_manage/module_viewer.html",
                                module_name=module_name,
-                               module_code=module_code)
+                               module_code=module_code,
+                               read_only_string="")
+
+    def repository_view_module(self, module_name):
+        user_obj = repository_user
+        module_code = user_obj.get_tile_module(module_name)
+        return render_template("user_manage/module_viewer.html",
+                               module_name=module_name,
+                               module_code=module_code,
+                               read_only_string="readonly")
 
     def load_tile_module(self, tile_module_name, return_json=True, user_obj=None):
         try:
@@ -653,6 +699,20 @@ class TileManager(ResourceManager):
         data_dict = {"tile_module_name": f.filename, "tile_module": the_module, "metadata": metadata}
         db[user_obj.tile_collection_name].insert_one(data_dict)
         self.update_selector_list(f.filename)
+        return jsonify({"success": True})
+
+    def create_duplicate_tile(self):
+        user_obj = current_user
+        tile_to_copy = request.json['res_to_copy']
+        new_tile_name = request.json['new_res_name']
+        if db[user_obj.tile_collection_name].find_one({"tile_module_name": new_tile_name}) is not None:
+            return jsonify({"success": False, "alert_type": "alert-warning",
+                            "message": "A tile with that name already exists"})
+        old_tile_dict = db[user_obj.tile_collection_name].find_one({"tile_module_name": tile_to_copy})
+        metadata = create_initial_metadata()
+        new_tile_dict = {"tile_module_name": new_tile_name, "tile_module": old_tile_dict["tile_module"], "metadata": metadata}
+        db[user_obj.tile_collection_name].insert_one(new_tile_dict)
+        self.update_selector_list(select=new_tile_name)
         return jsonify({"success": True})
 
     def create_tile_module(self):
@@ -843,6 +903,31 @@ def update_module():
         return jsonify({"success": True, "message": "Module Successfully Saved", "alert_type": "alert-success"})
     except:
         error_string = "Error saving module " + str(sys.exc_info()[0]) + " " + str(sys.exc_info()[1])
+        return jsonify({"success": False, "message": error_string, "alert_type": "alert-warning"})
+
+@app.route('/update_list', methods=['post'])
+@login_required
+def update_list():
+    try:
+        data_dict = request.json
+        list_name = data_dict["list_name"]
+        new_list_as_string = data_dict["new_list_as_string"]
+        new_list = new_list_as_string.split("\n")
+        doc = db[current_user.list_collection_name].find_one({"list_name": list_name})
+        if "metadata" in doc:
+            mdata = doc["metadata"]
+        else:
+            mdata = {}
+        mdata["tags"] = data_dict["tags"]
+        mdata["notes"] = data_dict["notes"]
+        mdata["updated"] = datetime.datetime.today()
+
+        db[current_user.list_collection_name].update_one({"list_name": list_name},
+                                                         {'$set': {"the_list": new_list, "metadata": mdata}})
+        list_manager.update_selector_list()
+        return jsonify({"success": True, "message": "List Successfully Saved", "alert_type": "alert-success"})
+    except:
+        error_string = "Error saving list " + str(sys.exc_info()[0]) + " " + str(sys.exc_info()[1])
         return jsonify({"success": False, "message": error_string, "alert_type": "alert-warning"})
 
 

@@ -20,6 +20,8 @@ from communication_utils import send_request_to_container
 import numpy
 import traceback
 import zlib
+import openpyxl
+import cStringIO
 
 INITIAL_LEFT_FRACTION = .69
 CHUNK_SIZE = 200
@@ -29,6 +31,7 @@ STEP_SIZE = 100
 # noinspection PyPep8Naming
 class docInfo:
     def __init__(self, name, data_rows, header_list=None, cell_backgrounds=None):
+
         self.name = name
         self.data_rows = copy.deepcopy(data_rows)  # All the data rows in the doc
         self.current_data_rows = self.data_rows  # The current filtered set of data rows
@@ -217,6 +220,7 @@ class mainWindow(QWorker):
             self.console_html = None
             self.user_id = data_dict["user_id"]
             self.doc_dict = self._build_doc_dict()
+            self.debug_log("Done with build_doc_dict")
             self.visible_doc_name = self.doc_dict.keys()[0]
 
     # Communication Methods
@@ -275,6 +279,22 @@ class mainWindow(QWorker):
         self.debug_log("leaving compile_save_dict in main")
         return result
 
+    def show_um_message(self, message, user_manage_id, timeout=None):
+        data = {"message": message, "timeout": timeout, "user_manage_id": user_manage_id}
+        self.post_task("host", "show_um_status_message_task", data)
+
+    def clear_um_message(self, user_manage_id):
+        data = {"user_manage_id": user_manage_id}
+        self.post_task("host", "clear_um_status_message_task", data)
+
+    def show_main_status_message(self, message, timeout=None):
+        data = {"message": message, "timeout": timeout, "main_id": self.my_id}
+        self.post_task("host", "show_main_status_message", data)
+
+    def clear_main_status_message(self):
+        data = {"main_id": self.my_id}
+        self.post_task("host", "clear_main_status_message", data)
+
     @task_worthy
     def do_full_recreation(self, data_dict):
         try:
@@ -282,7 +302,9 @@ class mainWindow(QWorker):
                                                                      data_dict["project_name"])
             self.post_and_wait("host", "load_modules", {"loaded_modules": loaded_modules, "user_id": data_dict["user_id"]})
             doc_names = [str(doc_name) for doc_name in self.doc_names]
+            self.show_um_message("Creating empty containers", data_dict["user_manage_id"])
             tile_containers = self.post_and_wait("host", "get_empty_tile_containers", {"number": len(tile_info_dict.keys())})
+            self.show_um_message("Getting tile code", data_dict["user_manage_id"])
             tile_code_dict = self.post_and_wait("host", "get_tile_code", {"tile_info_dict": tile_info_dict,
                                                                           "user_id": data_dict["user_id"]})
             new_tile_info = {}
@@ -297,6 +319,7 @@ class mainWindow(QWorker):
                                                     "megaplex_address": self.megaplex_address}).json()
                 if not result["success"]:
                     raise Exception(result["message_string"])
+            self.show_um_message("Recreating the tiles", data_dict["user_manage_id"])
             self.tile_save_results = self.recreate_project_tiles(data_dict["list_names"], new_tile_info)
             template_data = {"collection_name": self.collection_name,
                              "project_name": self.project_name,
@@ -308,6 +331,7 @@ class mainWindow(QWorker):
                              "short_collection_name": self.short_collection_name,
                              "new_tile_info": new_tile_info}
 
+            self.clear_um_message(data_dict["user_manage_id"])
             self.post_task("host", "open_project_window", {"user_manage_id": data_dict["user_manage_id"],
                                                            "template_data": template_data,
                                                            "message": "window-open"})
@@ -373,7 +397,11 @@ class mainWindow(QWorker):
             tile_save_dict["tile_id"] = new_tile_id
             tile_save_dict["main_id"] = self.my_id
             tile_save_dict["new_base_figure_url"] = self.base_figure_url.replace("tile_id", new_tile_id)
-            tile_result = send_request_to_container(new_tile_address, "recreate_from_save", tile_save_dict).json()
+            tresult = send_request_to_container(new_tile_address,
+                                                "recreate_from_save",
+                                                tile_save_dict,
+                                                timeout=60, tries=30)
+            tile_result = tresult.json()
             if not tile_result["success"]:
                 raise Exception(tile_result["message_string"])
             tile_results[new_tile_id] = tile_result
@@ -386,14 +414,15 @@ class mainWindow(QWorker):
         # Each tile needs to know the main_id it's associated with.
         # Also I have to build the pipe machinery.
         for tile_id, tile_result in tile_results.items():
-            if len(tile_result["exports"]) > 0:
-                if tile_id not in self._pipe_dict:
-                    self._pipe_dict[tile_id] = {}
-                for export in tile_result["exports"]:
-                    self._pipe_dict[tile_id][tile_result["tile_name"] + "_" + export] = {
-                        "export_name": export,
-                        "tile_id": tile_id,
-                        "tile_address": self.tile_instances[tile_id],}
+            if "exports" in tile_result:
+                if len(tile_result["exports"]) > 0:
+                    if tile_id not in self._pipe_dict:
+                        self._pipe_dict[tile_id] = {}
+                    for export in tile_result["exports"]:
+                        self._pipe_dict[tile_id][tile_result["tile_name"] + "_" + export] = {
+                            "export_name": export,
+                            "tile_id": tile_id,
+                            "tile_address": self.tile_instances[tile_id],}
 
         # We have to wait to here to actually render the tiles because
         # the pipe_dict needs to be complete to build the forms.
@@ -418,30 +447,28 @@ class mainWindow(QWorker):
             for (dname, spec) in tspec_dict.items():
                 self.doc_dict[dname].table_spec = spec
 
-            self.debug_log("posting get_loaded_user_modules")
+            self.show_main_status_message("Getting loaded modules")
             self.loaded_modules = self.post_and_wait("host", "get_loaded_user_modules", {"user_id": self.user_id})[
                 "loaded_modules"]
             self.loaded_modules = [str(module) for module in self.loaded_modules]
-            self.debug_log("got loaded user modules " + str(self.loaded_modules))
+            self.show_main_status_message("compiling save dictionary")
             project_dict = self.compile_save_dict()
-            self.debug_log("got compiled save_dict")
+
             save_dict = {}
             save_dict["metadata"] = self.create_initial_metadata()
             save_dict["project_name"] = project_dict["project_name"]
-            self.debug_log("about to pickle")
+            self.show_main_status_message("Pickle, convert, compress")
             pdict = cPickle.dumps(project_dict)
-            self.debug_log("converting to binary")
             pdict = Binary(zlib.compress(pdict))
-            self.debug_log("putting the data")
+            self.show_main_status_message("Writing the data")
             save_dict["file_id"] = self.fs.put(pdict)
-            self.debug_log("pickled and dumped")
             self.mdata = save_dict["metadata"]
-            self.debug_log("inserting the save_dict")
             self.db[self.project_collection_name].insert_one(save_dict)
+            self.clear_main_status_message()
+
             return_data = {"project_name": data_dict["project_name"],
                            "success": True,
                            "message_string": "Project Successfully Saved"}
-            self.debug_log("ready to return")
 
         except Exception as ex:
             self.debug_log("got an error in save_new_project")
@@ -459,19 +486,19 @@ class mainWindow(QWorker):
             tspec_dict = data_dict["tablespec_dict"]
             for (dname, spec) in tspec_dict.items():
                 self.doc_dict[dname].table_spec = spec
+            self.show_main_status_message("Getting loaded modules")
             self.loaded_modules = self.post_and_wait("host", "get_loaded_user_modules", {"user_id": self.user_id})[
                 "loaded_modules"]
             self.loaded_modules = [str(module) for module in self.loaded_modules]
+            self.show_main_status_message("compiling save dictionary")
             project_dict = self.compile_save_dict()
             pname = project_dict["project_name"]
             self.mdata["updated"] = datetime.datetime.today()
-            self.debug_log("pickling")
+            self.show_main_status_message("Pickle, convert, compress")
             pdict = cPickle.dumps(project_dict)
-            self.debug_log("Binarying")
             pdict = Binary(zlib.compress(pdict))
-            self.debug_log("about to put project_dict")
+            self.show_main_status_message("Writing the data")
             new_file_id = self.fs.put(pdict)
-            self.debug_log("finished the put")
             save_dict = self.db[self.project_collection_name].find_one({"project_name": pname})
             self.fs.delete(save_dict["file_id"])
             save_dict["project_name"] = pname
@@ -479,6 +506,7 @@ class mainWindow(QWorker):
             save_dict["file_id"] = new_file_id
             self.db[self.project_collection_name].update_one({"project_name": pname},
                                                              {'$set': save_dict})
+            self.clear_main_status_message()
             self.mdata = save_dict["metadata"]
             return_data = {"project_name": pname,
                            "success": True,
@@ -494,18 +522,18 @@ class mainWindow(QWorker):
     def _build_doc_dict(self):
         result = {}
         self.debug_log("building doc_dict with collection: " + self.collection_name)
-        try:
-            the_collection = self.db[self.collection_name]
-            for f in the_collection.find():
-                if str(f["name"]) == "__metadata__":
-                    continue
-                if "header_list" in f:
-                    # Note conversion of unicode filenames to strings
-                    result[str(f["name"])] = docInfo(str(f["name"]), f["data_rows"], f["header_list"])
-                else:
-                    result[str(f["name"])] = docInfo(str(f["name"]), f["data_rows"], [])
-        except:
-            return
+        the_collection = self.db[self.collection_name]
+        for f in the_collection.find():
+            fname = f["name"].encode("ascii", "ignore")
+            self.debug_log("Got fname " + fname)
+            if fname == "__metadata__":
+                continue
+            if "header_list" in f:
+                # Note conversion of unicode filenames to strings
+                self.debug_log("got header_list " + str(f["header_list"]))
+                result[fname] = docInfo(fname, f["data_rows"], f["header_list"])
+            else:
+                result[fname] = docInfo(fname, f["data_rows"], [])
         return result
 
     def _set_row_column_data(self, doc_name, the_id, column_header, new_content):
@@ -608,8 +636,11 @@ class mainWindow(QWorker):
     @staticmethod
     def txt_in_dict(txt, d):
         for val in d.values():
-            if str(txt).lower() in str(val).lower():
-                return True
+            try:
+                if str(txt).lower() in str(val).lower():
+                    return True
+            except UnicodeEncodeError:
+                continue
         return False
 
     # Task Worthy methods. These are eligible to be the recipient of posted tasks.
@@ -657,7 +688,7 @@ class mainWindow(QWorker):
         return {"success": True, "html": form_html}
 
     @task_worthy
-    def get_func(self, data_dict):  # todo this is too powerful for tile API
+    def get_func(self, data_dict):  # tactic_todo this is too powerful for tile API
         func_name = data_dict["func"]
         args = data_dict["args"]
         val = getattr(self, func_name)(*args)
@@ -769,6 +800,11 @@ class mainWindow(QWorker):
         return {"success": True}
 
     @task_worthy
+    def get_doc_dict(self, data):
+        return {"success": True, "doc_dict": self.doc_dict}
+
+
+    @task_worthy
     def get_tile_ids(self, data):
         tile_ids = self.tile_instances.keys()
         return {"success": True, "tile_ids": tile_ids}
@@ -790,6 +826,37 @@ class mainWindow(QWorker):
         self.post_task("host", "open_log_window", {"console_html": self.console_html,
                                                    "title": title,
                                                    "main_id": self.my_id})
+        return
+
+    # todo download_collection needs rethinking look at how pipe_values handled for a good model
+    # todo I'm in the middle of figuring out how to make this work.
+    @task_worthy
+    def download_collection(self, data):
+        new_name = data["new_name"]
+
+        wb = openpyxl.Workbook()
+        first = True
+        for (doc_name, doc_info) in self.doc_dict.items():
+            if first:
+                ws = wb.active
+                ws.title = doc_name
+                first = False
+            else:
+                ws = wb.create_sheet(title=doc_name)
+            data_rows = doc_info.all_sorted_data_rows
+            header_list = doc_info.header_list
+            for c, header in enumerate(header_list, start=1):
+                _ = ws.cell(row=1, column=c, value=header)
+            for r, row in enumerate(data_rows, start=2):
+                for c, header in enumerate(header_list, start=1):
+                    _ = ws.cell(row=r, column=c, value=row[header])
+            # noinspection PyUnresolvedReferences
+        virtual_notebook = openpyxl.writer.excel.save_virtual_workbook(wb)
+        str_io = cStringIO.StringIO()
+        str_io.write(virtual_notebook)
+        str_io.seek(0)
+        encoded_str_io = Binary(cPickle.dumps(str_io))
+        self.post_task("host", "send_file_to_client", {"encoded_str_io": encoded_str_io})
         return
 
     @task_worthy

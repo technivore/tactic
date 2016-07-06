@@ -35,7 +35,7 @@ jsonizable_types = {
 
 class TileBase(QWorker):
     category = "basic"
-    exports = {}
+    exports = []
     input_start_template = '<div class="form-group form-group-sm"">' \
                            '<label>{0}</label>'
     basic_input_template = '<input type="{1}" class="form-control input-sm" id="{0}" value="{2}"></input>' \
@@ -89,7 +89,7 @@ class TileBase(QWorker):
         self.current_data_id = 0
         self.current_unique_id_index = 0
         self.is_shrunk = False
-        # todo base_data_url keep or get rid of? Seems like this is used for d3plots maybe old ones only?
+        # tactic_todo base_data_url keep or get rid of? Seems like this is used for d3plots maybe old ones only?
         # self.base_data_url = url_for("data_source", main_id=main_id, tile_id=tile_id, data_name="X")[:-1]
         self.base_data_url = ""
         self.configured = False
@@ -244,6 +244,15 @@ class TileBase(QWorker):
     def LogTile(self, data):
         self.handle_log_tile()
         return None
+
+    @task_worthy
+    def LogParams(self, data):
+        parray = [["name", "value"]]
+        for opt in self.options:
+            parray.append([opt["name"], getattr(self, opt["name"])])
+
+        self.log_it(self.build_html_table_from_data_list(parray, title=self.tile_name,
+                                                         sidebyside=True))
 
     @task_worthy
     def RebuildTileForms(self, data):
@@ -871,7 +880,9 @@ class TileBase(QWorker):
             if pipe_key in tile_entry:
                 self.debug_log("found tile_entry: " + str(tile_entry))
                 result = self.post_and_wait(tile_entry[pipe_key]["tile_id"],
-                                            "transfer_pipe_value", {"export_name": tile_entry[pipe_key]["export_name"]})
+                                            "transfer_pipe_value", {"export_name": tile_entry[pipe_key]["export_name"]},
+                                            timeout=60,
+                                            tries=30)
                 encoded_val = result["encoded_val"]
                 val = cPickle.loads(encoded_val.decode("utf-8", "ignore").encode("ascii"))
                 return val
